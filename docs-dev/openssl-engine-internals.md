@@ -87,4 +87,60 @@ Devnote: There is no replacement for reading the openssl source code to figure o
 
 Let's trace an operation where a client uses a certificate from CS, whose private key is held by the KS, for client auth in a TLS connection to a server.
 
-![Create a TLS client with a private key from KS and a certificate from CS](img/openssl-engine-internals-tls-client.svg)
+### Create a TLS client with a private key from KS and a certificate from CS
+
+```mermaid
+sequenceDiagram
+	autonumber
+
+	participant client as Client
+	participant openssl as openssl client
+	participant keyd_engine as aziot_keys openssl engine
+
+	participant keyd as KS
+	participant libak as libaziot-keys
+	participant pkcs11 as PKCS#35;11 library
+
+	participant certd as CS
+
+	note over client, certd: Get key corresponding to key ID from KS
+	client ->>+ keyd: get_key_handle("key_id")
+	keyd ->> keyd: Evaluate policies
+	keyd ->>+ libak: load_key_pair("key_id")
+	libak ->> libak: Convert key ID to key URI
+	libak ->>+ pkcs11: C_FindObjects("key_label")
+	pkcs11 -->>- libak: OBJECT_HANDLE
+	libak -->>- keyd: OK
+	keyd ->> keyd: Synthesize key handle
+	keyd -->>- client: Ok("key handle")
+	client ->>+ keyd_engine: load_private_key("key handle")
+	keyd_engine ->> keyd_engine: Create new EVP_PKEY and attach key handle to its ex data.
+	keyd_engine -->>- client: openssl::EVP_PKEY
+
+	note over client, certd: Get cert corresponding to cert ID from CS
+	client ->>+ certd: load_cert("cert_id")
+	certd ->> certd: Evaluate policies
+	certd -->>- client: Ok(PEM)
+	client ->> client: Create openssl::X509 from PEM
+
+	note over client, certd: Create TLS connection
+	client ->>+ openssl: Create openssl client using openssl::EVP_PKEY + openssl::X509
+	client ->> openssl: connect to contoso.azure-devices.net:443
+	openssl ->>+ openssl: Handshake
+	openssl ->>+ keyd_engine: custom_EVP_PKEY_sign(openssl::ENGINE, openssl::EVP_PKEY, ...)
+	keyd_engine ->> keyd_engine: Extract key handle from EVP_PKEY's ex data
+	keyd_engine ->>+ keyd: sign("key handle", ...)
+	keyd ->> keyd: Evaluate policies
+	keyd ->> keyd: Convert key handle to key ID
+	keyd ->>+ libak: sign("key ID", ...)
+	libak ->> libak: Convert key ID to key URI
+	libak ->>+ pkcs11: C_FindObjects("key_uri")
+	pkcs11 -->>- libak: OBJECT_HANDLE
+	libak ->>+ pkcs11: C_Sign(pkcs11::OBJECT_HANDLE, ...)
+	pkcs11 -->>- libak : OK(signature)
+	libak -->>- keyd: OK(signature)
+	keyd -->>- keyd_engine: OK(signature)
+	keyd_engine -->>- openssl: OK(signature)
+	openssl -->>- openssl: Handshake complete
+	openssl -->>- client: Connected
+```
